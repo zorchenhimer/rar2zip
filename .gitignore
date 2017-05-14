@@ -1,4 +1,6 @@
 *.swp
 *.exe
 
+builds/
+
 rar2zip
