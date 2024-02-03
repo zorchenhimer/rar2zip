@@ -4,7 +4,6 @@ import (
     "archive/zip"
     "fmt"
     "io"
-    "io/ioutil"
     "os"
     "path/filepath"
     "strings"
@@ -13,20 +12,6 @@ import (
 )
 
 var verbose bool = false
-
-type Archive struct {
-    Name    string
-    Files   []File
-}
-
-type File struct {
-    Name    string
-    Data    []byte
-}
-
-func (f *File) String() string {
-    return fmt.Sprintf("<File Name:%q len(Data):%d>", f.Name, len(f.Data))
-}
 
 func main() {
     // Default to all rar files in the current directory.
@@ -69,87 +54,73 @@ func main() {
     fmt.Printf("Number of files to process: %d\n", len(files))
 
     for _, f := range files {
-        archive, err := process(f)
-        if err != nil {
-            fmt.Printf("Unable to read rar archive: %s\n", err)
-            continue
-        }
-
-        if err = create(archive); err != nil {
-            fmt.Printf("Unable to write zip archive: %s\n", err)
-        }
+		err := convert(f)
+		if err != nil {
+			fmt.Printf("Error converting %s: %s", f, err.Error())
+		}
     }
 }
 
-func create(archive *Archive) error {
-    file, err := os.Create(archive.Name)
-    if err != nil {
-        return fmt.Errorf("Unable to create file: %s", err)
-    }
-    defer file.Close()
+func convert(inputname string) error {
+	outname := inputname
+	if strings.HasSuffix(outname, ".rar") {
+		outname = outname[:len(outname)-4]+".zip"
+	} else {
+		outname = outname+".zip"
+	}
 
-    writer := zip.NewWriter(file)
-    defer writer.Close()
-    for _, f := range archive.Files {
-        w, err := writer.CreateHeader(&zip.FileHeader{
-            Name: f.Name,
-        })
-        if err != nil {
-            return fmt.Errorf("Unable to create file %q in archive: %s", f.Name, err)
-        }
+	rawin, err := os.Open(inputname)
+	if err != nil {
+		return err
+	}
+	defer rawin.Close()
 
-        fmt.Fprintf(w, "%s", f.Data)
-    }
-    return nil
-}
+	reader, err := rardecode.NewReader(rawin, "")
+	if err != nil {
+		return err
+	}
 
-func process(filename string) (*Archive, error) {
-    fmt.Printf("Processing %s\n", filename)
-    file, err := os.Open(filename)
-    if err != nil {
-        return nil, fmt.Errorf("Error opening %q for reading: %s\n", filename, err)
-    }
-    defer file.Close()
+	rawout, err := os.Create(outname)
+	if err != nil {
+		return err
+	}
+	defer rawout.Close()
 
-    reader, err := rardecode.NewReader(file, "")
-    if err != nil {
-        return nil, fmt.Errorf("Unable to open RAR file %q: %s\n", filename, err)
-    }
+	writer := zip.NewWriter(rawout)
+	defer writer.Close()
 
-    var header *rardecode.FileHeader
-    header, err = reader.Next()
-    if err != nil {
-        fmt.Printf("Bad first read: %s\n", err)
-        header, err = reader.Next()
-        if err != nil {
-            fmt.Printf("Bad second read: %s\n", err)
-            return nil, fmt.Errorf("First two reads bad")
-        }
-    }
-    filelist := []File{}
-    for err == nil {
-        if !header.IsDir {
-            if strings.ToLower(filepath.Base(header.Name)) == "thumbs.db" {
-                header, err = reader.Next()
-                continue
-            }
-            data, err := ioutil.ReadAll(reader)
-            if err != nil {
-                fmt.Println("Unable to ReadAll(): ", err)
-            }
-            if verbose {
-                fmt.Printf(" %s - len(data): %d\n", header.Name, len(data))
-            }
-            filelist = append(filelist, File{Name: header.Name, Data: data})
-        }
-        header, err = reader.Next()
-    }
-    if err != nil && err != io.EOF {
-        return nil, fmt.Errorf("Bad read: %s\n", err)
-    }
+	for {
+		header, err := reader.Next()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
 
-    newName := filename[0:strings.LastIndex(filename, ".")] + ".zip"
-    return &Archive{Name: newName, Files: filelist}, nil
+		if header.IsDir {
+			continue
+		}
+
+		fmt.Println(header.Name)
+		zhead := &zip.FileHeader{
+			Name: header.Name,
+			Method: zip.Deflate,
+			Modified: header.ModificationTime,
+		}
+
+		w, err := writer.CreateHeader(zhead)
+		if err != nil {
+			return err
+		}
+
+		_, err = io.Copy(w, reader)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func exists(path string) bool {
